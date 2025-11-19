@@ -1,0 +1,5 @@
+{
+  "name": "local_WattWise_v2",
+  "description": "Intelligent power consumption estimation for IT infrastructure Bills of Materials using OpenRouter AI.",
+  "requestFramePermissions": []
+}
