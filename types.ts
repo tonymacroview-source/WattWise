@@ -35,6 +35,9 @@ export interface PowerAnalysisResult {
 
   methodology: string; // Explanation of how values were derived
   sourceUrl?: string; // URL to the datasheet or product page
+  sourceTitle?: string; // Title of the document/page found
+  matchedModelSnippet?: string; // Text snippet proving the model match (e.g. "Specifications for C9300-48P")
+
   confidence: 'High' | 'Medium' | 'Low';
   notes: string; 
 }

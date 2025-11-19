@@ -1,8 +1,9 @@
 
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { PowerAnalysisResult, MetricSource } from '../types';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
-import { Download, AlertTriangle, CheckCircle2, Server, HardDrive, Network, Box, ChevronDown, RefreshCw, CheckSquare, Square, Thermometer, Zap, Activity, BookOpen, Calculator, Info, FileCode, ExternalLink, Quote } from 'lucide-react';
+import { Download, AlertTriangle, CheckCircle2, Server, HardDrive, Network, Box, ChevronDown, RefreshCw, CheckSquare, Square, Thermometer, Zap, Activity, BookOpen, Calculator, ExternalLink, Quote, FileCode } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { reEstimateItems } from '../services/geminiService';
 
@@ -12,6 +13,7 @@ interface DashboardProps {
   onUpdateResults: (results: PowerAnalysisResult[]) => void;
   apiKey: string;
   modelName: string;
+  maxRetries: number;
 }
 
 interface GroupedModel {
@@ -30,7 +32,9 @@ interface TooltipData {
     source: MetricSource;
     methodology: string;
     url?: string;
+    title?: string;
     citation?: string;
+    modelProof?: string;
     isEstimate: boolean;
   };
 }
@@ -38,22 +42,14 @@ interface TooltipData {
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 // --- Helper Component for Metrics ---
-const MetricValue: React.FC<{ 
-  value: number; 
-  unit?: string; 
-  source: MetricSource; 
-  methodology: string;
+
+interface IconWrapperProps {
   url?: string;
-  citation?: string;
-  isTotal?: boolean;
-  colorClass?: string;
-  onShowTooltip: (e: React.MouseEvent, data: TooltipData['content']) => void;
-  onHideTooltip: () => void;
-}> = ({ value, unit = "", source, methodology, url, citation, isTotal, colorClass = "text-slate-200", onShowTooltip, onHideTooltip }) => {
-  
-  const isEstimate = source === 'Estimation' || source === 'Formula';
-  
-  const IconWrapper = ({ children }: { children: React.ReactNode }) => {
+  isEstimate: boolean;
+  children: React.ReactNode;
+}
+
+const IconWrapper: React.FC<IconWrapperProps> = ({ url, isEstimate, children }) => {
      // Filter out Google Search URLs which cause "Abusive/Rate Limited" errors
      const isValidUrl = url && !url.includes('google.com/search') && !url.includes('google.com/url');
 
@@ -71,12 +67,29 @@ const MetricValue: React.FC<{
          )
      }
      return <div className="cursor-help">{children}</div>;
-  };
+};
+
+const MetricValue: React.FC<{ 
+  value: number; 
+  unit?: string; 
+  source: MetricSource; 
+  methodology: string;
+  url?: string;
+  title?: string;
+  citation?: string;
+  modelProof?: string;
+  isTotal?: boolean;
+  colorClass?: string;
+  onShowTooltip: (e: React.MouseEvent, data: TooltipData['content']) => void;
+  onHideTooltip: () => void;
+}> = React.memo(({ value, unit = "", source, methodology, url, title, citation, modelProof, colorClass = "text-slate-200", onShowTooltip, onHideTooltip }) => {
+  
+  const isEstimate = source === 'Estimation' || source === 'Formula';
 
   return (
     <div 
-      className="flex items-center justify-end gap-2"
-      onMouseEnter={(e) => onShowTooltip(e, { source, methodology, url, citation, isEstimate })}
+      className="flex items-center justify-end gap-2 group/metric py-1"
+      onMouseEnter={(e) => onShowTooltip(e, { source, methodology, url, title, citation, modelProof, isEstimate })}
       onMouseLeave={onHideTooltip}
     >
       <div className="flex flex-col items-end pointer-events-none">
@@ -86,275 +99,52 @@ const MetricValue: React.FC<{
         </span>
       </div>
       
-      <IconWrapper>
-        <div className={`p-1 rounded-full flex items-center justify-center ${isEstimate ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
+      <IconWrapper url={url} isEstimate={isEstimate}>
+        <div className={`p-1 rounded-full flex items-center justify-center transition-colors ${isEstimate ? 'bg-amber-500/10 text-amber-500 group-hover/metric:bg-amber-500/20' : 'bg-emerald-500/10 text-emerald-500 group-hover/metric:bg-emerald-500/20'}`}>
             {isEstimate ? <Calculator className="w-3 h-3" /> : <BookOpen className="w-3 h-3" />}
         </div>
       </IconWrapper>
     </div>
   );
-};
+});
 
+// --- Inner Content Component (Memoized to prevent re-renders on tooltip state change) ---
 
-const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults, apiKey, modelName }) => {
-  const [expandedFamily, setExpandedFamily] = useState<string | null>(null);
-  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
-  const [isReEstimating, setIsReEstimating] = useState(false);
-  
-  // Tooltip State
-  const [activeTooltip, setActiveTooltip] = useState<TooltipData | null>(null);
+interface DashboardContentProps {
+  summary: any;
+  groupedModels: GroupedModel[];
+  selectedIndices: Set<number>;
+  isReEstimating: boolean;
+  retryStatus: string | null;
+  onExpand: (family: string) => void;
+  expandedFamily: string | null;
+  onCheckboxChange: (index: number) => void;
+  onBulkReEstimate: () => void;
+  onReEstimateAll: () => void;
+  onExportExcel: () => void;
+  onExportHtml: () => void;
+  onReset: () => void;
+  onShowTooltip: (e: React.MouseEvent, data: TooltipData['content']) => void;
+  onHideTooltip: () => void;
+}
 
-  const handleShowTooltip = (e: React.MouseEvent, content: TooltipData['content']) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    setActiveTooltip({
-      x: rect.left + (rect.width / 2),
-      y: rect.top,
-      content
-    });
-  };
-
-  const handleHideTooltip = () => {
-    setActiveTooltip(null);
-  };
-
-  const summary = useMemo(() => {
-    const totalTypicalWatts = results.reduce((acc, curr) => acc + (curr.typicalPowerWatts * curr.quantity), 0);
-    const totalMaxWatts = results.reduce((acc, curr) => acc + (curr.maxPowerWatts * curr.quantity), 0);
-    const totalBTU = results.reduce((acc, curr) => acc + (curr.heatDissipationBTU * curr.quantity), 0);
-    
-    const totalTypicalKW = totalTypicalWatts / 1000;
-    const totalMaxKW = totalMaxWatts / 1000;
-
-    // Group by category for charts (using Max Watts for conservative planning)
-    const categoryMap = new Map<string, number>();
-    results.forEach(r => {
-      const current = categoryMap.get(r.category) || 0;
-      categoryMap.set(r.category, current + (r.maxPowerWatts * r.quantity));
-    });
-
-    const breakdown = Array.from(categoryMap.entries()).map(([name, value]) => ({
-      name,
-      value
-    })).sort((a, b) => b.value - a.value);
-
-    const highest = [...results].sort((a, b) => (b.maxPowerWatts * b.quantity) - (a.maxPowerWatts * a.quantity))[0];
-
-    return {
-      totalTypicalKW,
-      totalMaxKW,
-      totalBTU,
-      totalComponents: results.reduce((acc, curr) => acc + curr.quantity, 0),
-      breakdown,
-      highest
-    };
-  }, [results]);
-
-  // Group results by modelFamily
-  const groupedModels: GroupedModel[] = useMemo(() => {
-    const groups = new Map<string, GroupedModel>();
-
-    results.forEach((item, index) => {
-      const family = item.modelFamily || "Miscellaneous Parts";
-      if (!groups.has(family)) {
-        groups.set(family, {
-          modelFamily: family,
-          totalTypical: 0,
-          totalMax: 0,
-          totalBTU: 0,
-          items: [],
-          category: item.category 
-        });
-      }
-      const group = groups.get(family)!;
-      group.items.push({ ...item, originalIndex: index });
-      group.totalTypical += (item.typicalPowerWatts * item.quantity);
-      group.totalMax += (item.maxPowerWatts * item.quantity);
-      group.totalBTU += (item.heatDissipationBTU * item.quantity);
-    });
-
-    return Array.from(groups.values()).sort((a, b) => b.totalMax - a.totalMax);
-  }, [results]);
-
-  const exportToExcel = () => {
-    // Flatten the data for professional export
-    const exportData = results.map(r => ({
-        "Part Number": r.partNumber,
-        "Description": r.description,
-        "Model Family": r.modelFamily,
-        "Category": r.category,
-        "Quantity": r.quantity,
-        "Typical Unit (W)": r.typicalPowerWatts,
-        "Typical Source": r.typicalSource,
-        "Typical Citation": r.typicalPowerCitation || "",
-        "Typical Total (W)": r.typicalPowerWatts * r.quantity,
-        "Max Unit (W)": r.maxPowerWatts,
-        "Max Source": r.maxSource,
-        "Max Citation": r.maxPowerCitation || "",
-        "Max Total (W)": r.maxPowerWatts * r.quantity,
-        "Heat Unit (BTU/hr)": r.heatDissipationBTU,
-        "Heat Source": r.heatSource,
-        "Heat Total (BTU/hr)": r.heatDissipationBTU * r.quantity,
-        "Methodology": r.methodology,
-        "Source URL": r.sourceUrl || "",
-        "Confidence": r.confidence,
-        "Notes": r.notes
-    }));
-
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Detailed Analysis");
-    XLSX.writeFile(wb, "BOM_WattWise_Detailed_Report.xlsx");
-  };
-
-  const exportToHtml = () => {
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>WattWise Power Report</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-        <style>
-            body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #e2e8f0; }
-            /* Custom Scrollbar for table container */
-            ::-webkit-scrollbar { width: 8px; height: 8px; }
-            ::-webkit-scrollbar-track { background: #1e293b; }
-            ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
-            ::-webkit-scrollbar-thumb:hover { background: #64748b; }
-        </style>
-      </head>
-      <body class="p-8 max-w-7xl mx-auto">
-        <!-- Content generation same as previous version... trimmed for brevity in this XML update -->
-        <!-- (Logic preserved from original implementation) -->
-        <div class="text-center text-emerald-400">Exporting HTML...</div>
-      </body>
-      </html>
-    `;
-    
-    // Reuse the existing logic but since I'm updating the component code I need to make sure I don't break it.
-    // For brevity in this XML block, I am preserving the feature but acknowledging the file size limits.
-    // Re-implementing the full string:
-    
-    const fullHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WattWise Power Report</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<style>
-    body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #e2e8f0; }
-</style>
-</head>
-<body class="p-8 max-w-7xl mx-auto">
-<div class="flex items-center justify-between mb-8 border-b border-slate-700 pb-4">
-    <div><h1 class="text-3xl font-bold text-white">WattWise Report</h1><p class="text-slate-400 text-sm">${new Date().toLocaleString()}</p></div>
-    <div class="text-right"><div class="text-3xl font-bold text-emerald-400">${summary.totalMaxKW.toFixed(2)} kW</div></div>
-</div>
-<div class="grid grid-cols-3 gap-6 mb-12">
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Operational</div><div class="text-2xl font-bold text-white">${summary.totalTypicalKW.toFixed(2)} kW</div></div>
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Provisioned</div><div class="text-2xl font-bold text-white">${summary.totalMaxKW.toFixed(2)} kW</div></div>
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Thermal</div><div class="text-2xl font-bold text-white">${(summary.totalBTU / 1000).toFixed(1)}k BTU</div></div>
-</div>
-<div class="space-y-6">
-    ${groupedModels.map(group => `
-        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
-            <div class="p-4 bg-slate-900/50 border-b border-slate-700 flex justify-between">
-                <h3 class="text-lg font-semibold text-white">${group.modelFamily}</h3>
-                <span class="text-emerald-400 font-mono font-bold">${group.totalMax.toLocaleString()} W</span>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm text-slate-400">
-                    <thead class="bg-slate-900/30 text-xs uppercase"><tr><th class="px-4 py-2">Part</th><th class="px-4 py-2 text-center">Qty</th><th class="px-4 py-2 text-right">Typ (W)</th><th class="px-4 py-2 text-right">Max (W)</th><th class="px-4 py-2 text-right">BTU</th><th class="px-4 py-2 text-center">Src</th></tr></thead>
-                    <tbody class="divide-y divide-slate-700/50">
-                        ${group.items.map(item => `
-                            <tr>
-                                <td class="px-4 py-2"><div class="text-slate-200">${item.partNumber}</div><div class="text-xs text-slate-500">${item.description}</div></td>
-                                <td class="px-4 py-2 text-center">${item.quantity}</td>
-                                <td class="px-4 py-2 text-right">${item.typicalPowerWatts * item.quantity}</td>
-                                <td class="px-4 py-2 text-right font-bold text-white">${item.maxPowerWatts * item.quantity}</td>
-                                <td class="px-4 py-2 text-right">${Math.round(item.heatDissipationBTU * item.quantity)}</td>
-                                <td class="px-4 py-2 text-center text-xs">${item.typicalSource === 'Datasheet' ? 'DS' : 'EST'}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `).join('')}
-</div>
-</body></html>`;
-
-    const blob = new Blob([fullHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `WattWise_Report_${new Date().toISOString().split('T')[0]}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleCheckboxChange = (index: number) => {
-    const newSelected = new Set(selectedIndices);
-    if (newSelected.has(index)) {
-      newSelected.delete(index);
-    } else {
-      newSelected.add(index);
-    }
-    setSelectedIndices(newSelected);
-  };
-
-  const handleBulkReEstimate = async () => {
-    if (selectedIndices.size === 0) return;
-
-    setIsReEstimating(true);
-    try {
-      const indicesArray = Array.from(selectedIndices);
-      const itemsToProcess = indicesArray.map(i => results[i]);
-      
-      const updatedItems = await reEstimateItems(itemsToProcess, apiKey, modelName);
-
-      // Merge updates back into results
-      const newResults = [...results];
-      indicesArray.forEach((originalIndex, i) => {
-        if (updatedItems[i]) {
-          newResults[originalIndex] = updatedItems[i];
-        }
-      });
-
-      onUpdateResults(newResults);
-      setSelectedIndices(new Set());
-    } catch (error) {
-      console.error("Bulk re-estimate failed", error);
-      alert("Failed to re-estimate selected items.");
-    } finally {
-      setIsReEstimating(false);
-    }
-  };
-
-  const handleReEstimateAll = async () => {
-    if (results.length === 0) return;
-    if (!window.confirm("Re-estimating the entire BOM will use significant API tokens. Continue?")) {
-        return;
-    }
-
-    setIsReEstimating(true);
-    try {
-      const updatedItems = await reEstimateItems(results, apiKey, modelName);
-      if (updatedItems && updatedItems.length > 0) {
-          onUpdateResults(updatedItems);
-      }
-    } catch (error) {
-      console.error("Global re-estimate failed", error);
-      alert("Failed to re-estimate all items.");
-    } finally {
-      setIsReEstimating(false);
-    }
-  };
+const DashboardContent: React.FC<DashboardContentProps> = React.memo(({ 
+    summary, 
+    groupedModels, 
+    selectedIndices, 
+    isReEstimating, 
+    retryStatus,
+    onExpand, 
+    expandedFamily, 
+    onCheckboxChange, 
+    onBulkReEstimate, 
+    onReEstimateAll,
+    onExportExcel, 
+    onExportHtml,
+    onReset,
+    onShowTooltip,
+    onHideTooltip
+}) => {
 
   const getConfidenceColor = (conf: string) => {
     switch (conf) {
@@ -373,67 +163,8 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
       return <Box className="w-5 h-5 text-slate-400" />;
   };
 
-  const toggleExpand = (family: string) => {
-    setExpandedFamily(expandedFamily === family ? null : family);
-  };
-
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 pb-24 relative">
-      
-      {/* --- Fixed Tooltip Portal --- */}
-      {activeTooltip && (
-         <div 
-            className="fixed z-[9999] pointer-events-none"
-            style={{ 
-               left: activeTooltip.x, 
-               top: activeTooltip.y, 
-               transform: 'translate(-100%, -100%)',
-               marginTop: '-10px',
-               marginLeft: '20px'
-            }}
-         >
-            <div className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded-lg shadow-2xl p-3 w-72 relative animate-in fade-in zoom-in-95 duration-150">
-               <div className="flex items-center gap-2 mb-1 pb-1 border-b border-slate-700">
-                 {activeTooltip.content.isEstimate ? (
-                   <>
-                     <Calculator className="w-3 h-3 text-amber-400" />
-                     <span className="font-semibold text-amber-400">Estimated Value</span>
-                   </>
-                 ) : (
-                    <>
-                     <BookOpen className="w-3 h-3 text-emerald-400" />
-                     <span className="font-semibold text-emerald-400">Datasheet Reference</span>
-                     {activeTooltip.content.url && !activeTooltip.content.url.includes('google.com') && <ExternalLink className="w-3 h-3 text-slate-500 ml-auto" />}
-                   </>
-                 )}
-               </div>
-               
-               <p className="text-slate-400 leading-relaxed mb-2">
-                  {activeTooltip.content.methodology || (activeTooltip.content.isEstimate ? "Calculated based on device class." : "Sourced from manufacturer specs.")}
-               </p>
-
-               {/* Citation Snippet */}
-               {activeTooltip.content.citation && !activeTooltip.content.isEstimate && (
-                 <div className="bg-slate-900/50 border-l-2 border-emerald-500 p-2 rounded text-[10px] text-slate-300 italic">
-                   <div className="flex gap-1 mb-0.5 text-emerald-500/70">
-                     <Quote className="w-3 h-3" />
-                   </div>
-                   "{activeTooltip.content.citation}"
-                 </div>
-               )}
-
-               {activeTooltip.content.url && !activeTooltip.content.isEstimate && !activeTooltip.content.url.includes('google.com') && (
-                   <div className="mt-2 text-[10px] text-blue-400 truncate flex items-center gap-1">
-                       Click icon to view source
-                   </div>
-               )}
-               
-               {/* Little Triangle */}
-               <div className="absolute bottom-[-6px] right-4 w-3 h-3 bg-slate-800 border-r border-b border-slate-600 rotate-45"></div>
-            </div>
-         </div>
-      )}
-
+    <>
       {/* Top Summary Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {/* 1. Operational Load */}
@@ -482,10 +213,17 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
         </div>
 
         {/* 4. Actions Panel */}
-        <div className="bg-slate-800/80 rounded-xl p-4 border border-slate-700/60 shadow-lg flex flex-col justify-center gap-3">
+        <div className="bg-slate-800/80 rounded-xl p-4 border border-slate-700/60 shadow-lg flex flex-col justify-center gap-3 relative">
+            {/* Retry Status Text */}
+            {retryStatus && (
+                <div className="absolute -top-12 right-0 bg-yellow-900/90 text-yellow-400 text-xs px-3 py-2 rounded-lg border border-yellow-700/50 shadow-lg max-w-[250px] text-center animate-pulse">
+                    {retryStatus}
+                </div>
+            )}
+            
             {selectedIndices.size > 0 ? (
                 <button 
-                    onClick={handleBulkReEstimate} 
+                    onClick={onBulkReEstimate} 
                     disabled={isReEstimating}
                     className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg transition-all disabled:opacity-50"
                 >
@@ -494,7 +232,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                 </button>
             ) : (
                 <button 
-                    onClick={handleReEstimateAll}
+                    onClick={onReEstimateAll}
                     disabled={isReEstimating} 
                     className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-all disabled:opacity-50"
                 >
@@ -504,11 +242,11 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
             )}
 
             <div className="grid grid-cols-2 gap-2">
-                <button onClick={exportToExcel} disabled={isReEstimating} className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-all disabled:opacity-50">
+                <button onClick={onExportExcel} disabled={isReEstimating} className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-all disabled:opacity-50">
                     <Download className="w-4 h-4" />
                     Excel
                 </button>
-                <button onClick={exportToHtml} disabled={isReEstimating} className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg transition-all disabled:opacity-50">
+                <button onClick={onExportHtml} disabled={isReEstimating} className="flex items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg transition-all disabled:opacity-50">
                     <FileCode className="w-4 h-4" />
                     HTML
                 </button>
@@ -546,7 +284,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                         <div key={group.modelFamily} className={`bg-slate-800 rounded-xl border transition-all duration-300 overflow-hidden ${isExpanded ? 'border-emerald-500 shadow-emerald-900/20 shadow-lg' : 'border-slate-700 hover:border-slate-600'}`}>
                             {/* Tile Header / Summary */}
                             <div 
-                                onClick={() => toggleExpand(group.modelFamily)}
+                                onClick={() => onExpand(group.modelFamily)}
                                 className="p-5 cursor-pointer flex flex-col md:flex-row md:items-center justify-between group select-none gap-4"
                             >
                                 <div className="flex items-center gap-4">
@@ -602,7 +340,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                                 <tr key={item.originalIndex} className={`group/row hover:bg-slate-700/20 transition-colors ${selectedIndices.has(item.originalIndex) ? 'bg-blue-900/10' : ''}`}>
                                                     <td className="px-4 py-3 text-center">
                                                         <button 
-                                                            onClick={() => handleCheckboxChange(item.originalIndex)}
+                                                            onClick={() => onCheckboxChange(item.originalIndex)}
                                                             className={`flex items-center justify-center transition-colors ${selectedIndices.has(item.originalIndex) ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}
                                                         >
                                                             {selectedIndices.has(item.originalIndex) ? 
@@ -627,10 +365,12 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                                           source={item.typicalSource}
                                                           methodology={item.methodology}
                                                           url={item.sourceUrl}
+                                                          title={item.sourceTitle}
                                                           citation={item.typicalPowerCitation}
+                                                          modelProof={item.matchedModelSnippet}
                                                           colorClass="text-slate-200"
-                                                          onShowTooltip={handleShowTooltip}
-                                                          onHideTooltip={handleHideTooltip}
+                                                          onShowTooltip={onShowTooltip}
+                                                          onHideTooltip={onHideTooltip}
                                                         />
                                                         <div className="text-[10px] text-slate-600 mr-6">@{item.typicalPowerWatts}ea</div>
                                                     </td>
@@ -642,10 +382,12 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                                           source={item.maxSource}
                                                           methodology={item.methodology}
                                                           url={item.sourceUrl}
+                                                          title={item.sourceTitle}
                                                           citation={item.maxPowerCitation}
+                                                          modelProof={item.matchedModelSnippet}
                                                           colorClass="text-white font-bold"
-                                                          onShowTooltip={handleShowTooltip}
-                                                          onHideTooltip={handleHideTooltip}
+                                                          onShowTooltip={onShowTooltip}
+                                                          onHideTooltip={onHideTooltip}
                                                         />
                                                         <div className="text-[10px] text-slate-600 mr-6">@{item.maxPowerWatts}ea</div>
                                                     </td>
@@ -657,9 +399,10 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                                           source={item.heatSource}
                                                           methodology={item.methodology}
                                                           url={item.sourceUrl}
+                                                          title={item.sourceTitle}
                                                           colorClass="text-orange-300"
-                                                          onShowTooltip={handleShowTooltip}
-                                                          onHideTooltip={handleHideTooltip}
+                                                          onShowTooltip={onShowTooltip}
+                                                          onHideTooltip={onHideTooltip}
                                                         />
                                                     </td>
 
@@ -696,7 +439,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                 paddingAngle={5}
                                 dataKey="value"
                             >
-                                {summary.breakdown.map((entry, index) => (
+                                {summary.breakdown.map((entry: any, index: number) => (
                                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} stroke="rgba(0,0,0,0)" />
                                 ))}
                             </Pie>
@@ -725,7 +468,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                                 formatter={(value: number) => [`${(value/1000).toFixed(2)} kW`, 'Total Max Power']}
                             />
                             <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20}>
-                                {summary.breakdown.map((entry, index) => (
+                                {summary.breakdown.map((entry: any, index: number) => (
                                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                                 ))}
                             </Bar>
@@ -734,9 +477,309 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                  </div>
              </div>
         </div>
-
       </div>
+    </>
+  );
+});
 
+const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults, apiKey, modelName, maxRetries }) => {
+  const [expandedFamily, setExpandedFamily] = useState<string | null>(null);
+  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
+  const [isReEstimating, setIsReEstimating] = useState(false);
+  const [retryStatus, setRetryStatus] = useState<string | null>(null);
+  const [activeTooltip, setActiveTooltip] = useState<TooltipData | null>(null);
+
+  // Memoized Handlers to prevent re-renders of DashboardContent
+  const handleShowTooltip = useCallback((e: React.MouseEvent, content: TooltipData['content']) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    // Calculate basic position
+    let x = rect.left + (rect.width / 2);
+    let y = rect.top;
+    
+    setActiveTooltip({ x, y, content });
+  }, []);
+
+  const handleHideTooltip = useCallback(() => {
+    setActiveTooltip(null);
+  }, []);
+
+  const handleExpand = useCallback((family: string) => {
+    setExpandedFamily(prev => prev === family ? null : family);
+  }, []);
+
+  const handleCheckboxChange = useCallback((index: number) => {
+    setSelectedIndices(prev => {
+        const newSelected = new Set(prev);
+        if (newSelected.has(index)) newSelected.delete(index);
+        else newSelected.add(index);
+        return newSelected;
+    });
+  }, []);
+
+  const summary = useMemo(() => {
+    const totalTypicalWatts = results.reduce((acc, curr) => acc + (curr.typicalPowerWatts * curr.quantity), 0);
+    const totalMaxWatts = results.reduce((acc, curr) => acc + (curr.maxPowerWatts * curr.quantity), 0);
+    const totalBTU = results.reduce((acc, curr) => acc + (curr.heatDissipationBTU * curr.quantity), 0);
+    
+    const totalTypicalKW = totalTypicalWatts / 1000;
+    const totalMaxKW = totalMaxWatts / 1000;
+
+    const categoryMap = new Map<string, number>();
+    results.forEach(r => {
+      const current = categoryMap.get(r.category) || 0;
+      categoryMap.set(r.category, current + (r.maxPowerWatts * r.quantity));
+    });
+
+    const breakdown = Array.from(categoryMap.entries()).map(([name, value]) => ({
+      name,
+      value
+    })).sort((a, b) => b.value - a.value);
+
+    return {
+      totalTypicalKW,
+      totalMaxKW,
+      totalBTU,
+      breakdown
+    };
+  }, [results]);
+
+  const groupedModels: GroupedModel[] = useMemo(() => {
+    const groups = new Map<string, GroupedModel>();
+    results.forEach((item, index) => {
+      const family = item.modelFamily || "Miscellaneous Parts";
+      if (!groups.has(family)) {
+        groups.set(family, {
+          modelFamily: family,
+          totalTypical: 0,
+          totalMax: 0,
+          totalBTU: 0,
+          items: [],
+          category: item.category 
+        });
+      }
+      const group = groups.get(family)!;
+      group.items.push({ ...item, originalIndex: index });
+      group.totalTypical += (item.typicalPowerWatts * item.quantity);
+      group.totalMax += (item.maxPowerWatts * item.quantity);
+      group.totalBTU += (item.heatDissipationBTU * item.quantity);
+    });
+    return Array.from(groups.values()).sort((a, b) => b.totalMax - a.totalMax);
+  }, [results]);
+
+  const handleBulkReEstimate = useCallback(async () => {
+    if (selectedIndices.size === 0) return;
+    setIsReEstimating(true);
+    setRetryStatus(null);
+    try {
+      const indicesArray: number[] = Array.from(selectedIndices);
+      const itemsToProcess = indicesArray.map((i: number) => results[i]);
+      const updatedItems = await reEstimateItems(itemsToProcess, apiKey, modelName, maxRetries, (msg) => setRetryStatus(msg));
+      const newResults = [...results];
+      indicesArray.forEach((originalIndex: number, i: number) => {
+        if (updatedItems[i]) {
+          newResults[originalIndex] = updatedItems[i];
+        }
+      });
+      onUpdateResults(newResults);
+      setSelectedIndices(new Set());
+    } catch (error) {
+      console.error("Bulk re-estimate failed", error);
+      alert("Failed to re-estimate selected items.");
+    } finally {
+      setIsReEstimating(false);
+      setRetryStatus(null);
+    }
+  }, [selectedIndices, results, apiKey, modelName, maxRetries, onUpdateResults]);
+
+  const handleReEstimateAll = useCallback(async () => {
+    if (results.length === 0) return;
+    if (!window.confirm("Re-estimating the entire BOM will use significant API tokens. Continue?")) return;
+    setIsReEstimating(true);
+    setRetryStatus(null);
+    try {
+      const updatedItems = await reEstimateItems(results, apiKey, modelName, maxRetries, (msg) => setRetryStatus(msg));
+      if (updatedItems && updatedItems.length > 0) {
+          onUpdateResults(updatedItems);
+      }
+    } catch (error) {
+      console.error("Global re-estimate failed", error);
+      alert("Failed to re-estimate all items.");
+    } finally {
+      setIsReEstimating(false);
+      setRetryStatus(null);
+    }
+  }, [results, apiKey, modelName, maxRetries, onUpdateResults]);
+
+  const exportToExcel = useCallback(() => {
+    const exportData = results.map(r => ({
+        "Part Number": r.partNumber,
+        "Description": r.description,
+        "Model Family": r.modelFamily,
+        "Category": r.category,
+        "Quantity": r.quantity,
+        "Typical Unit (W)": r.typicalPowerWatts,
+        "Typical Source": r.typicalSource,
+        "Typical Citation": r.typicalPowerCitation || "",
+        "Typical Total (W)": r.typicalPowerWatts * r.quantity,
+        "Max Unit (W)": r.maxPowerWatts,
+        "Max Source": r.maxSource,
+        "Max Citation": r.maxPowerCitation || "",
+        "Max Total (W)": r.maxPowerWatts * r.quantity,
+        "Heat Unit (BTU/hr)": r.heatDissipationBTU,
+        "Heat Source": r.heatSource,
+        "Heat Total (BTU/hr)": r.heatDissipationBTU * r.quantity,
+        "Methodology": r.methodology,
+        "Source URL": r.sourceUrl || "",
+        "Source Title": r.sourceTitle || "",
+        "Matched Model": r.matchedModelSnippet || "",
+        "Confidence": r.confidence,
+        "Notes": r.notes
+    }));
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Detailed Analysis");
+    XLSX.writeFile(wb, "BOM_WattWise_Detailed_Report.xlsx");
+  }, [results]);
+
+  const exportToHtml = useCallback(() => {
+     const fullHtmlContent = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WattWise Power Report</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+    body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #e2e8f0; }
+</style>
+</head>
+<body class="p-8 max-w-7xl mx-auto">
+<div class="flex items-center justify-between mb-8 border-b border-slate-700 pb-4">
+    <div><h1 class="text-3xl font-bold text-white">WattWise Report</h1><p class="text-slate-400 text-sm">${new Date().toLocaleString()}</p></div>
+</div>
+<div class="grid grid-cols-3 gap-6 mb-12">
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Operational</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.typicalPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Provisioned</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.maxPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Thermal</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.heatDissipationBTU*c.quantity),0)/1000).toFixed(1)}k BTU</div></div>
+</div>
+<div class="space-y-6">
+    ${groupedModels.map(group => `
+        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+            <div class="p-4 bg-slate-900/50 border-b border-slate-700 flex justify-between">
+                <h3 class="text-lg font-semibold text-white">${group.modelFamily}</h3>
+                <span class="text-emerald-400 font-mono font-bold">${group.totalMax.toLocaleString()} W</span>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm text-slate-400">
+                    <thead class="bg-slate-900/30 text-xs uppercase"><tr><th class="px-4 py-2">Part</th><th class="px-4 py-2 text-center">Qty</th><th class="px-4 py-2 text-right">Typ (W)</th><th class="px-4 py-2 text-right">Max (W)</th><th class="px-4 py-2 text-right">BTU</th><th class="px-4 py-2 text-center">Src</th></tr></thead>
+                    <tbody class="divide-y divide-slate-700/50">
+                        ${group.items.map(item => `
+                            <tr>
+                                <td class="px-4 py-2"><div class="text-slate-200">${item.partNumber}</div><div class="text-xs text-slate-500">${item.description}</div></td>
+                                <td class="px-4 py-2 text-center">${item.quantity}</td>
+                                <td class="px-4 py-2 text-right">${item.typicalPowerWatts * item.quantity}</td>
+                                <td class="px-4 py-2 text-right font-bold text-white">${item.maxPowerWatts * item.quantity}</td>
+                                <td class="px-4 py-2 text-right">${Math.round(item.heatDissipationBTU * item.quantity)}</td>
+                                <td class="px-4 py-2 text-center text-xs">${item.typicalSource === 'Datasheet' ? 'DS' : 'EST'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `).join('')}
+</div>
+</body></html>`;
+    const blob = new Blob([fullHtmlContent], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `WattWise_Report_${new Date().toISOString().split('T')[0]}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [groupedModels, results]);
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 pb-24 relative">
+      {/* Tooltip Portal - Renders directly to body to ensure top layer and no clipping */}
+      {activeTooltip && createPortal(
+         <div 
+            className="fixed z-[9999] pointer-events-none transition-opacity duration-150"
+            style={{ 
+               left: activeTooltip.x, 
+               top: activeTooltip.y, 
+               transform: 'translate(-50%, -120%)', // Centered above target, clear of cursor
+            }}
+         >
+            <div className="bg-slate-800 border border-slate-600 text-slate-200 text-xs rounded shadow-xl p-3 w-[550px] relative flex flex-col gap-2">
+               {/* Header: Title & Source */}
+               <div className="flex items-start justify-between gap-2 border-b border-slate-700 pb-2 mb-1">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                     <div className={`flex-shrink-0 flex items-center gap-1.5 px-2 py-0.5 rounded border ${activeTooltip.content.isEstimate ? 'bg-amber-900/20 border-amber-700/50 text-amber-400' : 'bg-emerald-900/20 border-emerald-700/50 text-emerald-400'}`}>
+                        {activeTooltip.content.isEstimate ? <Calculator className="w-3 h-3" /> : <BookOpen className="w-3 h-3" />}
+                        <span className="font-semibold uppercase text-[10px] tracking-wider">
+                           {activeTooltip.content.isEstimate ? 'Est' : 'Ref'}
+                        </span>
+                     </div>
+                     {activeTooltip.content.title && (
+                         <span className="font-semibold text-slate-100 truncate" title={activeTooltip.content.title}>
+                            {activeTooltip.content.title}
+                         </span>
+                     )}
+                  </div>
+                  {activeTooltip.content.url && !activeTooltip.content.isEstimate && (
+                     <span className="text-[10px] text-blue-400 flex-shrink-0">External Link ↗</span>
+                  )}
+               </div>
+
+               {/* Body: Methodology & Citation */}
+               <div className="flex flex-col gap-1">
+                  <div className="text-slate-300">
+                     <span className="text-slate-500 mr-1">Method:</span>
+                     {activeTooltip.content.methodology || (activeTooltip.content.isEstimate ? "Calculated by device class" : "Datasheet Spec")}
+                  </div>
+                  
+                  {activeTooltip.content.citation && !activeTooltip.content.isEstimate && (
+                     <div className="text-emerald-500/80 italic bg-emerald-900/10 border-l-2 border-emerald-600 pl-2 py-1 mt-1 text-[11px]">
+                         "{activeTooltip.content.citation}"
+                     </div>
+                  )}
+               </div>
+
+               {/* Footer: Matched Model Proof */}
+               {activeTooltip.content.modelProof && (
+                   <div className="mt-1 pt-2 border-t border-slate-700 text-[10px] flex items-center gap-1.5 text-blue-300/80">
+                       <CheckCircle2 className="w-3 h-3" />
+                       <span>Matched in text: <span className="font-mono text-blue-200">"{activeTooltip.content.modelProof}"</span></span>
+                   </div>
+               )}
+               
+               {/* Arrow */}
+               <div className="absolute bottom-[-5px] left-1/2 -translate-x-1/2 w-2 h-2 bg-slate-800 border-r border-b border-slate-600 rotate-45"></div>
+            </div>
+         </div>,
+         document.body
+      )}
+
+      <DashboardContent 
+         summary={summary}
+         groupedModels={groupedModels}
+         selectedIndices={selectedIndices}
+         isReEstimating={isReEstimating}
+         retryStatus={retryStatus}
+         onExpand={handleExpand}
+         expandedFamily={expandedFamily}
+         onCheckboxChange={handleCheckboxChange}
+         onBulkReEstimate={handleBulkReEstimate}
+         onReEstimateAll={handleReEstimateAll}
+         onExportExcel={exportToExcel}
+         onExportHtml={exportToHtml}
+         onReset={onReset}
+         onShowTooltip={handleShowTooltip}
+         onHideTooltip={handleHideTooltip}
+      />
     </div>
   );
 };

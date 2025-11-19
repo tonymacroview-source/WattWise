@@ -1,11 +1,12 @@
+
 import React, { useState, useCallback } from 'react';
 import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import Dashboard from './components/Dashboard';
-import { AnalysisStatus, PowerAnalysisResult } from './types';
+import { AnalysisStatus, PowerAnalysisResult, RawBOMRow } from './types';
 import { parseExcelFile } from './services/excelService';
 import { analyzeBOM } from './services/geminiService';
-import { Key, Cpu } from 'lucide-react';
+import { Key, Cpu, RefreshCw } from 'lucide-react';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
@@ -13,6 +14,9 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [modelName, setModelName] = useState('tngtech/deepseek-r1t2-chimera:free');
+  const [maxRetries, setMaxRetries] = useState(3);
+  const [processingItems, setProcessingItems] = useState<string[]>([]);
+  const [retryMessage, setRetryMessage] = useState<string | null>(null);
 
   const handleFileSelect = useCallback(async (file: File) => {
     if (!apiKey) {
@@ -22,6 +26,8 @@ const App: React.FC = () => {
 
     setStatus(AnalysisStatus.PARSING);
     setErrorMsg(null);
+    setProcessingItems([]);
+    setRetryMessage(null);
 
     try {
       // 1. Parse File
@@ -31,13 +37,38 @@ const App: React.FC = () => {
         throw new Error("No data found in the file.");
       }
 
+      // Extract items for the status animation
+      // Look for columns like Description, Product, Model, or just use the longest string
+      const sampleItems = rawRows.slice(0, 50).map((row: RawBOMRow) => {
+         const keys = Object.keys(row);
+         // Try to find Description
+         const descKey = keys.find(k => k.toLowerCase().includes('desc'));
+         if (descKey && row[descKey]) {
+            const val = String(row[descKey]);
+            return val.length > 40 ? val.substring(0, 40) + '...' : val;
+         }
+         
+         // Try to find Part Number
+         const partKey = keys.find(k => k.toLowerCase().includes('part') || k.toLowerCase().includes('model'));
+         if (partKey && row[partKey]) return String(row[partKey]);
+
+         // Fallback to first reasonably long string
+         const values = Object.values(row);
+         const fallback = values.find(v => typeof v === 'string' && v.length > 5);
+         return fallback ? String(fallback) : 'Unknown Item';
+      }).filter(item => item !== 'Unknown Item');
+
+      setProcessingItems(sampleItems);
+
       // 2. Analyze with AI
       setStatus(AnalysisStatus.ANALYZING);
       
       // Small delay to allow UI to update
       await new Promise(r => setTimeout(r, 500));
 
-      const analysis = await analyzeBOM(rawRows, apiKey, modelName);
+      const analysis = await analyzeBOM(rawRows, apiKey, modelName, maxRetries, (msg) => {
+         setRetryMessage(msg);
+      });
       
       setResults(analysis);
       setStatus(AnalysisStatus.COMPLETE);
@@ -46,12 +77,14 @@ const App: React.FC = () => {
       setStatus(AnalysisStatus.ERROR);
       setErrorMsg(err.message || "An unexpected error occurred.");
     }
-  }, [apiKey, modelName]);
+  }, [apiKey, modelName, maxRetries]);
 
   const handleReset = () => {
       setStatus(AnalysisStatus.IDLE);
       setResults([]);
       setErrorMsg(null);
+      setProcessingItems([]);
+      setRetryMessage(null);
   };
 
   const handleUpdateResults = (newResults: PowerAnalysisResult[]) => {
@@ -76,8 +109,8 @@ const App: React.FC = () => {
                     </p>
                  </div>
 
-                 <div className="w-full max-w-md mx-auto mb-8 grid grid-cols-1 gap-4">
-                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm">
+                 <div className="w-full max-w-md mx-auto mb-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm col-span-2">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
                             OpenRouter API Key
                         </label>
@@ -97,8 +130,30 @@ const App: React.FC = () => {
                             Your key is used directly from your browser and is not stored.
                         </p>
                     </div>
+                    
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm col-span-1">
+                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+                            Max Retries
+                        </label>
+                        <div className="relative">
+                            <input 
+                                type="number"
+                                min="1"
+                                max="10" 
+                                value={maxRetries}
+                                onChange={(e) => setMaxRetries(parseInt(e.target.value) || 3)}
+                                className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block p-2.5 pr-10 transition-colors"
+                            />
+                            <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                                <RefreshCw className="w-4 h-4 text-slate-500" />
+                            </div>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-2">
+                            Attempts on error.
+                        </p>
+                    </div>
 
-                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm">
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm col-span-3">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
                             LLM Model
                         </label>
@@ -124,6 +179,8 @@ const App: React.FC = () => {
                     <UploadZone 
                         onFileSelected={handleFileSelect} 
                         isProcessing={status === AnalysisStatus.PARSING || status === AnalysisStatus.ANALYZING} 
+                        processingItems={processingItems}
+                        retryMessage={retryMessage}
                     />
                  </div>
 
@@ -137,7 +194,14 @@ const App: React.FC = () => {
               </div>
            </div>
         ) : (
-           <Dashboard results={results} onReset={handleReset} onUpdateResults={handleUpdateResults} apiKey={apiKey} modelName={modelName} />
+           <Dashboard 
+             results={results} 
+             onReset={handleReset} 
+             onUpdateResults={handleUpdateResults} 
+             apiKey={apiKey} 
+             modelName={modelName}
+             maxRetries={maxRetries}
+           />
         )}
       </main>
 

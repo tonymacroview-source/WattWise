@@ -1,9 +1,12 @@
+
 import React, { useState, useEffect } from 'react';
 import { UploadCloud, FileSpreadsheet, AlertCircle, Zap } from 'lucide-react';
 
 interface UploadZoneProps {
   onFileSelected: (file: File) => void;
   isProcessing: boolean;
+  processingItems?: string[];
+  retryMessage?: string | null;
 }
 
 const LOADING_MESSAGES = [
@@ -16,10 +19,11 @@ const LOADING_MESSAGES = [
   "Finalizing power budget report..."
 ];
 
-const UploadZone: React.FC<UploadZoneProps> = ({ onFileSelected, isProcessing }) => {
+const UploadZone: React.FC<UploadZoneProps> = ({ onFileSelected, isProcessing, processingItems = [], retryMessage }) => {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messageIndex, setMessageIndex] = useState(0);
+  const [itemIndex, setItemIndex] = useState(0);
 
   useEffect(() => {
     let interval: any;
@@ -33,6 +37,19 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onFileSelected, isProcessing })
       if (interval) clearInterval(interval);
     };
   }, [isProcessing]);
+
+  // Fast cycle for processing items animation
+  useEffect(() => {
+    let interval: any;
+    if (isProcessing && processingItems.length > 0) {
+      interval = setInterval(() => {
+        setItemIndex((prev) => (prev + 1) % processingItems.length);
+      }, 150); // Fast 150ms cycle for scanning effect
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isProcessing, processingItems]);
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -92,20 +109,35 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onFileSelected, isProcessing })
             <div className="flex flex-col items-center justify-center w-full animate-in fade-in duration-500">
                <div className="relative w-16 h-16 mb-6">
                  <div className="absolute inset-0 border-4 border-slate-700 rounded-full"></div>
-                 <div className="absolute inset-0 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-                 <Zap className="absolute inset-0 m-auto w-6 h-6 text-emerald-400 animate-pulse" />
+                 <div className={`absolute inset-0 border-4 ${retryMessage ? 'border-yellow-500' : 'border-emerald-500'} border-t-transparent rounded-full animate-spin`}></div>
+                 <Zap className={`absolute inset-0 m-auto w-6 h-6 ${retryMessage ? 'text-yellow-500' : 'text-emerald-400'} animate-pulse`} />
                </div>
                
                <div className="h-8 flex items-center justify-center overflow-hidden relative w-full">
-                  <p 
-                    key={messageIndex} 
-                    className="text-lg font-medium text-emerald-400 animate-[fadeInUp_0.5s_ease-out]"
-                  >
-                    {LOADING_MESSAGES[messageIndex]}
-                  </p>
+                  {retryMessage ? (
+                     <p className="text-lg font-medium text-yellow-400 animate-pulse">
+                       {retryMessage}
+                     </p>
+                  ) : (
+                     <p 
+                       key={messageIndex} 
+                       className="text-lg font-medium text-emerald-400 animate-[fadeInUp_0.5s_ease-out]"
+                     >
+                       {LOADING_MESSAGES[messageIndex]}
+                     </p>
+                  )}
                </div>
+
+               {/* Dynamic Item Scanning Animation */}
+               {processingItems.length > 0 && !retryMessage && (
+                 <div className="h-6 mt-2 flex items-center justify-center w-full max-w-md overflow-hidden">
+                    <p className="text-xs font-mono text-slate-500/80 truncate">
+                       Scanning: <span className="text-slate-300">{processingItems[itemIndex]}</span>
+                    </p>
+                 </div>
+               )}
                
-               <p className="text-xs text-slate-500 mt-3">
+               <p className="text-xs text-slate-500 mt-4">
                  Processing large BOMs may take up to 60 seconds via OpenRouter.
                </p>
             </div>
