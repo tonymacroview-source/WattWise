@@ -86,10 +86,15 @@ const withRetry = async <T>(
   fn: () => Promise<T>, 
   retriesLeft: number, 
   delay: number,
-  onRetry?: (message: string) => void,
+  onRetry?: (message: string | null) => void,
   attempt: number = 1
 ): Promise<T> => {
   try {
+    // Clear warning message when starting a new attempt (if it's a retry)
+    // This allows the UI to revert to the normal "Processing" animation
+    if (attempt > 1 && onRetry) {
+        onRetry(null);
+    }
     return await fn();
   } catch (error: any) {
     if (retriesLeft <= 0) throw error;
@@ -119,7 +124,7 @@ export const analyzeBOM = async (
   apiKey: string,
   model: string,
   maxRetries: number = 3,
-  onRetry?: (msg: string) => void
+  onRetry?: (msg: string | null) => void
 ): Promise<PowerAnalysisResult[]> => {
   const openai = getAiClient(apiKey);
   // Reduce batch size to 20 to prevent token truncation with verbose responses
@@ -209,7 +214,7 @@ export const reEstimateItems = async (
   apiKey: string,
   model: string,
   maxRetries: number = 3,
-  onRetry?: (msg: string) => void
+  onRetry?: (msg: string | null) => void
 ): Promise<PowerAnalysisResult[]> => {
   const openai = getAiClient(apiKey);
 

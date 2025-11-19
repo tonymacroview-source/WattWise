@@ -39,7 +39,9 @@ export interface PowerAnalysisResult {
   matchedModelSnippet?: string; // Text snippet proving the model match (e.g. "Specifications for C9300-48P")
 
   confidence: 'High' | 'Medium' | 'Low';
-  notes: string; 
+  notes: string;
+  
+  isIgnored?: boolean; // If true, exclude from total calculations
 }
 
 export interface ProjectSummary {

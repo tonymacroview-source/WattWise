@@ -3,7 +3,7 @@ import React, { useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { PowerAnalysisResult, MetricSource } from '../types';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
-import { Download, AlertTriangle, CheckCircle2, Server, HardDrive, Network, Box, ChevronDown, RefreshCw, CheckSquare, Square, Thermometer, Zap, Activity, BookOpen, Calculator, ExternalLink, Quote, FileCode } from 'lucide-react';
+import { Download, AlertTriangle, CheckCircle2, Server, HardDrive, Network, Box, ChevronDown, RefreshCw, CheckSquare, Square, Thermometer, Zap, Activity, BookOpen, Calculator, ExternalLink, Quote, FileCode, Eye, EyeOff } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { reEstimateItems } from '../services/geminiService';
 
@@ -119,6 +119,7 @@ interface DashboardContentProps {
   onExpand: (family: string) => void;
   expandedFamily: string | null;
   onCheckboxChange: (index: number) => void;
+  onToggleIgnore: (index: number) => void;
   onBulkReEstimate: () => void;
   onReEstimateAll: () => void;
   onExportExcel: () => void;
@@ -137,6 +138,7 @@ const DashboardContent: React.FC<DashboardContentProps> = React.memo(({
     onExpand, 
     expandedFamily, 
     onCheckboxChange, 
+    onToggleIgnore,
     onBulkReEstimate, 
     onReEstimateAll,
     onExportExcel, 
@@ -337,7 +339,7 @@ const DashboardContent: React.FC<DashboardContentProps> = React.memo(({
                                         </thead>
                                         <tbody className="divide-y divide-slate-700/50">
                                             {group.items.map((item) => (
-                                                <tr key={item.originalIndex} className={`group/row hover:bg-slate-700/20 transition-colors ${selectedIndices.has(item.originalIndex) ? 'bg-blue-900/10' : ''}`}>
+                                                <tr key={item.originalIndex} className={`group/row hover:bg-slate-700/20 transition-colors ${selectedIndices.has(item.originalIndex) ? 'bg-blue-900/10' : ''} ${item.isIgnored ? 'opacity-40 bg-slate-950/50 grayscale' : ''}`}>
                                                     <td className="px-4 py-3 text-center">
                                                         <button 
                                                             onClick={() => onCheckboxChange(item.originalIndex)}
@@ -350,10 +352,22 @@ const DashboardContent: React.FC<DashboardContentProps> = React.memo(({
                                                         </button>
                                                     </td>
                                                     <td className="px-4 py-3">
-                                                        <div className="flex items-baseline gap-2">
-                                                            <span className="font-medium text-slate-200">{item.partNumber || "N/A"}</span>
+                                                        <div className="flex items-start gap-2 justify-between">
+                                                            <div>
+                                                                <div className="flex items-baseline gap-2">
+                                                                    <span className={`font-medium text-slate-200 ${item.isIgnored ? 'line-through' : ''}`}>{item.partNumber || "N/A"}</span>
+                                                                    {item.isIgnored && <span className="text-[10px] text-slate-500 font-medium uppercase tracking-wider ml-2 border border-slate-700 px-1 rounded">Ignored</span>}
+                                                                </div>
+                                                                <div className="text-xs text-slate-500 truncate max-w-xs">{item.description}</div>
+                                                            </div>
+                                                            <button 
+                                                                onClick={() => onToggleIgnore(item.originalIndex)}
+                                                                className={`p-1 rounded hover:bg-slate-700 transition-colors ${item.isIgnored ? 'text-slate-500' : 'text-slate-600 hover:text-slate-300'}`}
+                                                                title={item.isIgnored ? "Include in calculation" : "Ignore from calculation"}
+                                                            >
+                                                                {item.isIgnored ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                                            </button>
                                                         </div>
-                                                        <div className="text-xs text-slate-500 truncate max-w-xs">{item.description}</div>
                                                         {item.notes && <div className="text-[10px] text-slate-500 mt-1 italic group-hover/row:text-slate-400">{item.notes}</div>}
                                                     </td>
                                                     <td className="px-4 py-3 text-center text-slate-300">{item.quantity}</td>
@@ -516,16 +530,28 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
     });
   }, []);
 
+  const handleToggleIgnore = useCallback((index: number) => {
+     const newResults = [...results];
+     newResults[index] = { 
+         ...newResults[index], 
+         isIgnored: !newResults[index].isIgnored 
+     };
+     onUpdateResults(newResults);
+  }, [results, onUpdateResults]);
+
   const summary = useMemo(() => {
-    const totalTypicalWatts = results.reduce((acc, curr) => acc + (curr.typicalPowerWatts * curr.quantity), 0);
-    const totalMaxWatts = results.reduce((acc, curr) => acc + (curr.maxPowerWatts * curr.quantity), 0);
-    const totalBTU = results.reduce((acc, curr) => acc + (curr.heatDissipationBTU * curr.quantity), 0);
+    // Filter out ignored items from total calculation
+    const activeResults = results.filter(r => !r.isIgnored);
+    
+    const totalTypicalWatts = activeResults.reduce((acc, curr) => acc + (curr.typicalPowerWatts * curr.quantity), 0);
+    const totalMaxWatts = activeResults.reduce((acc, curr) => acc + (curr.maxPowerWatts * curr.quantity), 0);
+    const totalBTU = activeResults.reduce((acc, curr) => acc + (curr.heatDissipationBTU * curr.quantity), 0);
     
     const totalTypicalKW = totalTypicalWatts / 1000;
     const totalMaxKW = totalMaxWatts / 1000;
 
     const categoryMap = new Map<string, number>();
-    results.forEach(r => {
+    activeResults.forEach(r => {
       const current = categoryMap.get(r.category) || 0;
       categoryMap.set(r.category, current + (r.maxPowerWatts * r.quantity));
     });
@@ -559,9 +585,13 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
       }
       const group = groups.get(family)!;
       group.items.push({ ...item, originalIndex: index });
-      group.totalTypical += (item.typicalPowerWatts * item.quantity);
-      group.totalMax += (item.maxPowerWatts * item.quantity);
-      group.totalBTU += (item.heatDissipationBTU * item.quantity);
+      
+      // Only add to group totals if not ignored
+      if (!item.isIgnored) {
+        group.totalTypical += (item.typicalPowerWatts * item.quantity);
+        group.totalMax += (item.maxPowerWatts * item.quantity);
+        group.totalBTU += (item.heatDissipationBTU * item.quantity);
+      }
     });
     return Array.from(groups.values()).sort((a, b) => b.totalMax - a.totalMax);
   }, [results]);
@@ -612,6 +642,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
 
   const exportToExcel = useCallback(() => {
     const exportData = results.map(r => ({
+        "Ignored": r.isIgnored ? "YES" : "NO",
         "Part Number": r.partNumber,
         "Description": r.description,
         "Model Family": r.modelFamily,
@@ -620,14 +651,14 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
         "Typical Unit (W)": r.typicalPowerWatts,
         "Typical Source": r.typicalSource,
         "Typical Citation": r.typicalPowerCitation || "",
-        "Typical Total (W)": r.typicalPowerWatts * r.quantity,
+        "Typical Total (W)": r.isIgnored ? 0 : (r.typicalPowerWatts * r.quantity),
         "Max Unit (W)": r.maxPowerWatts,
         "Max Source": r.maxSource,
         "Max Citation": r.maxPowerCitation || "",
-        "Max Total (W)": r.maxPowerWatts * r.quantity,
+        "Max Total (W)": r.isIgnored ? 0 : (r.maxPowerWatts * r.quantity),
         "Heat Unit (BTU/hr)": r.heatDissipationBTU,
         "Heat Source": r.heatSource,
-        "Heat Total (BTU/hr)": r.heatDissipationBTU * r.quantity,
+        "Heat Total (BTU/hr)": r.isIgnored ? 0 : (r.heatDissipationBTU * r.quantity),
         "Methodology": r.methodology,
         "Source URL": r.sourceUrl || "",
         "Source Title": r.sourceTitle || "",
@@ -642,6 +673,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
   }, [results]);
 
   const exportToHtml = useCallback(() => {
+     const activeResults = results.filter(r => !r.isIgnored);
      const fullHtmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -659,9 +691,9 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
     <div><h1 class="text-3xl font-bold text-white">WattWise Report</h1><p class="text-slate-400 text-sm">${new Date().toLocaleString()}</p></div>
 </div>
 <div class="grid grid-cols-3 gap-6 mb-12">
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Operational</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.typicalPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Provisioned</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.maxPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
-    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Thermal</div><div class="text-2xl font-bold text-white">${(results.reduce((a,c)=>a+(c.heatDissipationBTU*c.quantity),0)/1000).toFixed(1)}k BTU</div></div>
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Operational</div><div class="text-2xl font-bold text-white">${(activeResults.reduce((a,c)=>a+(c.typicalPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Provisioned</div><div class="text-2xl font-bold text-white">${(activeResults.reduce((a,c)=>a+(c.maxPowerWatts*c.quantity),0)/1000).toFixed(2)} kW</div></div>
+    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700"><div class="text-slate-400 text-xs font-bold uppercase">Thermal</div><div class="text-2xl font-bold text-white">${(activeResults.reduce((a,c)=>a+(c.heatDissipationBTU*c.quantity),0)/1000).toFixed(1)}k BTU</div></div>
 </div>
 <div class="space-y-6">
     ${groupedModels.map(group => `
@@ -675,7 +707,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
                     <thead class="bg-slate-900/30 text-xs uppercase"><tr><th class="px-4 py-2">Part</th><th class="px-4 py-2 text-center">Qty</th><th class="px-4 py-2 text-right">Typ (W)</th><th class="px-4 py-2 text-right">Max (W)</th><th class="px-4 py-2 text-right">BTU</th><th class="px-4 py-2 text-center">Src</th></tr></thead>
                     <tbody class="divide-y divide-slate-700/50">
                         ${group.items.map(item => `
-                            <tr>
+                            <tr class="${item.isIgnored ? 'opacity-50 line-through' : ''}">
                                 <td class="px-4 py-2"><div class="text-slate-200">${item.partNumber}</div><div class="text-xs text-slate-500">${item.description}</div></td>
                                 <td class="px-4 py-2 text-center">${item.quantity}</td>
                                 <td class="px-4 py-2 text-right">${item.typicalPowerWatts * item.quantity}</td>
@@ -772,6 +804,7 @@ const Dashboard: React.FC<DashboardProps> = ({ results, onReset, onUpdateResults
          onExpand={handleExpand}
          expandedFamily={expandedFamily}
          onCheckboxChange={handleCheckboxChange}
+         onToggleIgnore={handleToggleIgnore}
          onBulkReEstimate={handleBulkReEstimate}
          onReEstimateAll={handleReEstimateAll}
          onExportExcel={exportToExcel}
